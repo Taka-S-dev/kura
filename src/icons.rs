@@ -27,6 +27,8 @@ pub fn glyph(lang: Option<&str>) -> &'static str {
         Some("ps") => "\u{ebc7}",
         Some("sh") => "\u{e795}",
         Some("ht") => "\u{e736}",
+        Some("sv") => "\u{e697}",
+        Some("vu") => "\u{e6a0}",
         _ => "",
     }
 }
@@ -98,7 +100,10 @@ mod tests {
 
     #[test]
     fn every_language_has_its_own_icon() {
-        let tags = ["rs", "go", "ts", "js", "py", "cs", "c", "md"];
+        let tags = [
+            "rs", "go", "ts", "js", "py", "cs", "c", "md", "cp", "ja", "kt", "rb", "ph", "sw",
+            "lu", "ps", "sh", "ht", "sv", "vu",
+        ];
         let mut seen: Vec<&str> = tags.iter().map(|t| glyph(Some(t))).collect();
         assert_eq!(glyph(None), "");
         let count = seen.len();

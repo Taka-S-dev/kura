@@ -290,6 +290,9 @@ struct Columns {
 
 const POINTER: usize = 3;
 const LANG: usize = 3;
+/// An icon, then the tag beside it: a Nerd Font draws icons small, so the
+/// letters still say the language when the icon is hard to make out.
+const LANG_ICON: usize = 5;
 /// Room for "●12 ↑3 ↓4"; fixed, so answers arriving do not move columns.
 const STATUS: usize = 10;
 const AGE: usize = 5;
@@ -300,10 +303,10 @@ const GAP: usize = 2;
 const NAME_MAX: usize = 24;
 const BRANCH_MAX: usize = 12;
 
-fn columns(width: usize, name: usize, branch: Option<usize>) -> Columns {
+fn columns(width: usize, name: usize, branch: Option<usize>, icons: bool) -> Columns {
     let mut c = Columns {
         lang: true,
-        icons: false,
+        icons,
         name,
         status: true,
         branch,
@@ -312,7 +315,11 @@ fn columns(width: usize, name: usize, branch: Option<usize>) -> Columns {
     };
     let used = |c: &Columns| {
         POINTER
-            + if c.lang { LANG } else { 0 }
+            + match (c.lang, c.icons) {
+                (false, _) => 0,
+                (true, false) => LANG,
+                (true, true) => LANG_ICON,
+            }
             + c.name
             + if c.status { GAP + STATUS } else { 0 }
             + c.branch.map_or(0, |b| b + GAP)
@@ -388,8 +395,7 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
         .map(UnicodeWidthStr::width)
         .max()
         .map(|w| w.min(BRANCH_MAX));
-    let mut cols = columns(area.width as usize, name_w, branch_w);
-    cols.icons = app.icons;
+    let cols = columns(area.width as usize, name_w, branch_w, app.icons);
     let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
     let roots = app.roots().to_vec();
     let now = SystemTime::now();
@@ -450,12 +456,11 @@ fn row(
     ];
     if cols.lang {
         let tag = repo.lang.unwrap_or("");
-        let shown = if cols.icons {
-            crate::icons::glyph(repo.lang)
+        if cols.icons {
+            spans.extend(with_icon(repo.lang));
         } else {
-            tag
-        };
-        spans.push(Span::styled(pad(shown, LANG), theme::lang(tag)));
+            spans.push(Span::styled(pad(tag, LANG), theme::lang(tag)));
+        }
     }
     let name = fit(&repo.name, cols.name);
     spans.extend(highlight(&name, hits));
@@ -975,6 +980,16 @@ fn fit_left(text: &str, width: usize) -> String {
     std::iter::once('…').chain(kept.into_iter().rev()).collect()
 }
 
+/// "<icon> rs" in `LANG_ICON` cells, or blanks for no language. The icon
+/// carries the colour and the tag stays quiet, so the two do not compete.
+fn with_icon(lang: Option<&str>) -> Vec<Span<'static>> {
+    let tag = lang.unwrap_or("");
+    vec![
+        Span::styled(pad(crate::icons::glyph(lang), 2), theme::lang(tag)),
+        Span::styled(pad(tag, LANG_ICON - 2), theme::QUIET),
+    ]
+}
+
 fn pad(text: &str, width: usize) -> String {
     let w = text.width();
     format!("{text}{}", " ".repeat(width.saturating_sub(w)))
@@ -1475,7 +1490,7 @@ fn draw_setup(frame: &mut Frame, area: Rect, setup: &Setup, app: &App) {
     lines.push(Line::raw(""));
     let sample: Vec<Span> = ["rs", "go", "ts", "py", "md"]
         .iter()
-        .map(|t| Span::styled(format!("{} ", crate::icons::glyph(Some(t))), theme::lang(t)))
+        .flat_map(|t| with_icon(Some(t)))
         .collect();
     let mut icons = vec![
         Span::raw("  "),
@@ -1516,16 +1531,29 @@ mod tests {
 
     #[test]
     fn columns_drop_in_order_as_the_window_narrows() {
-        let wide = columns(100, 12, Some(6));
+        let wide = columns(100, 12, Some(6), false);
         assert!(wide.parent.is_some() && wide.age && wide.branch.is_some() && wide.lang);
         // No room for the folder, but the age still fits and stays.
-        let no_folder = columns(62, 24, Some(12));
+        let no_folder = columns(62, 24, Some(12), false);
         assert!(no_folder.parent.is_none() && no_folder.age && no_folder.branch.is_some());
-        let mid = columns(40, 12, Some(6));
+        let mid = columns(40, 12, Some(6), false);
         assert!(mid.parent.is_none() && !mid.age && mid.branch.is_some());
-        let narrow = columns(16, 12, Some(6));
+        let narrow = columns(16, 12, Some(6), false);
         assert!(narrow.branch.is_none() && !narrow.lang);
         assert!(POINTER + narrow.name <= 16);
+    }
+
+    #[test]
+    fn icons_come_with_the_tag_and_take_their_room() {
+        let width = |spans: Vec<Span>| spans.iter().map(|s| s.content.width()).sum::<usize>();
+        let rs = with_icon(Some("rs"));
+        assert_eq!(rs[1].content.trim(), "rs");
+        assert_eq!(rs[1].style, theme::QUIET);
+        assert_eq!(width(rs), LANG_ICON);
+        assert_eq!(width(with_icon(None)), LANG_ICON);
+        let plain = columns(100, 12, Some(6), false).parent.unwrap();
+        let icons = columns(100, 12, Some(6), true).parent.unwrap();
+        assert_eq!(plain - icons, LANG_ICON - LANG);
     }
 
     #[test]
