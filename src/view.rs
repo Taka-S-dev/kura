@@ -64,6 +64,16 @@ mod theme {
         .fg(Color::Indexed(255))
         .bg(Color::Indexed(236))
         .add_modifier(Modifier::BOLD);
+    pub const MODAL: Style = Style::new().fg(Color::Indexed(252)).bg(Color::Indexed(235));
+    pub const MODAL_CURRENT: Style = Style::new()
+        .fg(Color::Indexed(255))
+        .bg(Color::Indexed(239))
+        .add_modifier(Modifier::BOLD);
+    pub const BACKDROP: Style = Style::new()
+        .fg(Color::Indexed(240))
+        .bg(Color::Indexed(234))
+        .remove_modifier(Modifier::BOLD)
+        .remove_modifier(Modifier::REVERSED);
     pub fn lang(tag: &str) -> Style {
         let color = match tag {
             "rs" => 173,
@@ -141,9 +151,53 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.profiles.is_some() {
         draw_profiles(frame, area, app);
     } else if app.menu.is_some() {
+        dim_background(frame, area, app);
         draw_menu(frame, area, app);
     } else if app.help {
+        dim_background(frame, area, app);
         draw_help(frame, area, app);
+    }
+}
+
+fn dim_background(frame: &mut Frame, area: Rect, app: &App) {
+    let targets = app.targets();
+    // Save semantic foreground colors before dimming the underlying screen.
+    let mut colors = Vec::new();
+    for (row, hit) in app
+        .hits
+        .iter()
+        .skip(app.offset)
+        .take(app.list_area.height as usize)
+        .enumerate()
+    {
+        if !targets
+            .iter()
+            .any(|r| r.key() == app.repos[hit.index].key())
+        {
+            continue;
+        }
+        let y = app.list_area.y + row as u16;
+        for x in app.list_area.x..app.list_area.right() {
+            colors.push((x, y, frame.buffer_mut()[(x, y)].fg));
+        }
+    }
+    frame.buffer_mut().set_style(area, theme::BACKDROP);
+    for (x, y, foreground) in colors {
+        let foreground = if foreground == ratatui::style::Color::Reset {
+            ratatui::style::Color::Indexed(250)
+        } else {
+            foreground
+        };
+        frame.buffer_mut()[(x, y)].set_style(
+            Style::new()
+                .fg(foreground)
+                .bg(ratatui::style::Color::Indexed(236)),
+        );
+        // Keep the location marker legible without restoring the row's bold text.
+        frame.buffer_mut().set_style(
+            Rect::new(app.list_area.x, y, POINTER as u16, 1),
+            theme::PROMPT,
+        );
     }
 }
 
@@ -1082,13 +1136,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-/// A box in the lower right, over the list.
+/// Keep transient actions near the center of attention, even on wide screens.
 fn popup(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width.saturating_sub(2));
     let height = height.min(area.height.saturating_sub(2));
     Rect::new(
-        area.right().saturating_sub(width + 2),
-        area.bottom().saturating_sub(height + 2),
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
         width,
         height,
     )
@@ -1098,8 +1152,10 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App) {
     let Some(index) = app.menu else {
         return;
     };
-    let title = match app.marked.len() {
-        0 | 1 => app.current().map(|r| r.name.clone()).unwrap_or_default(),
+    let targets = app.targets();
+    let title = match targets.len() {
+        0 => "No repositories".to_string(),
+        1 => targets[0].name.clone(),
         n => format!("{n} repositories"),
     };
     let label_w = app
@@ -1108,7 +1164,7 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App) {
         .map(|i| app.label(i).width())
         .max()
         .unwrap_or(0);
-    let inner_w = (4 + label_w + 12).max(34);
+    let inner_w = (4 + label_w + 12).max(42);
     let mut lines: Vec<Line> = app
         .items
         .iter()
@@ -1126,18 +1182,45 @@ fn draw_menu(frame: &mut Frame, area: Rect, app: &App) {
                 Span::styled(format!("{tag:>rest$} "), theme::QUIET),
             ]);
             if i == index {
-                line.patch_style(theme::CURRENT)
+                line.patch_style(theme::MODAL_CURRENT)
             } else {
                 line
             }
         })
         .collect();
+    if let [target] = targets.as_slice()
+        && app.repos.iter().filter(|r| r.name == target.name).count() > 1
+    {
+        let width = inner_w
+            .min(area.width.saturating_sub(4) as usize)
+            .saturating_sub(2);
+        let mut context: Vec<Line> = wrap(&target.path.to_string_lossy(), width)
+            .into_iter()
+            .map(|text| Line::styled(format!(" {text}"), theme::QUIET))
+            .collect();
+        context.push(Line::raw(""));
+        context.extend(lines);
+        lines = context;
+    }
     lines.push(Line::raw(""));
+    let after = match app.after_label() {
+        "stay" => "keep kura open",
+        "quit" => "close kura",
+        _ => "use configured behavior",
+    };
+    lines.push(Line::raw(format!(" After running: {after}")));
+    lines.push(Line::styled(" ctrl-x change behavior", theme::QUIET));
     lines.push(Line::styled(
-        format!(" after: {:<7} ctrl-x switches", app.after_label()),
+        " ↑↓ choose  enter run  esc close",
         theme::QUIET,
     ));
-    boxed(frame, area, &title, lines, inner_w as u16);
+    boxed(
+        frame,
+        area,
+        &format!("Actions · {title}"),
+        lines,
+        inner_w as u16,
+    );
 }
 
 fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
@@ -1181,22 +1264,29 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &App) {
     let width = rows.iter().map(|r| r.1.width()).max().unwrap_or(0);
     let lines: Vec<Line> = rows
         .into_iter()
-        .map(|(key, label, short)| {
-            Line::from(vec![
+        .enumerate()
+        .map(|(index, (key, label, short))| {
+            let line = Line::from(vec![
                 Span::styled(
                     format!(" {key}"),
                     theme::PROMPT.add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(format!("  {}  ", pad(&label, width))),
                 Span::styled(short, theme::QUIET),
-            ])
+            ]);
+            if index == app.quick_selected {
+                line.patch_style(theme::MODAL_CURRENT)
+            } else {
+                line
+            }
         })
         .chain([
             Line::raw(""),
             Line::styled(
-                " a letter runs it  ·  esc closes  ·  f1 full help",
+                " ↑↓ / ctrl-j/k choose · enter run · esc close",
                 theme::QUIET,
             ),
+            Line::styled(" letter: run directly · f1 full help", theme::QUIET),
         ])
         .collect();
     let inner = lines.iter().map(Line::width).max().unwrap_or(0) + 1;
@@ -1415,7 +1505,8 @@ fn boxed(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line>, inner_w: 
     frame.render_widget(Clear, rect);
     let block = Block::new()
         .borders(Borders::ALL)
-        .border_style(theme::BORDER)
+        .border_style(theme::PROMPT)
+        .style(theme::MODAL)
         .title(Span::styled(
             format!(" {title} "),
             Style::new().add_modifier(Modifier::BOLD),
@@ -1639,6 +1730,132 @@ mod tests {
         let wrapped = wrap_field(field, 20);
         assert!(wrapped.len() > 1);
         assert!(wrapped.iter().all(|line| line.width() <= 21));
+    }
+
+    #[test]
+    fn wide_layout_keeps_details_close_and_modal_has_visual_focus() {
+        let (list, preview) = split(Rect::new(0, 2, 280, 60));
+        let preview = preview.unwrap();
+        assert_eq!(list.width, 104);
+        assert_eq!(preview.x, list.right());
+        assert!(preview.width <= 72);
+        let (_tmp, mut app) = sample();
+        app.menu = Some(0);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(280, 65)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(Some(buffer[(1, 1)].fg), theme::BACKDROP.fg);
+        let selected_y = app.list_area.y + (app.selected_index().unwrap() - app.offset) as u16;
+        assert_ne!(Some(buffer[(1, selected_y)].bg), theme::BACKDROP.bg);
+        assert_eq!(Some(buffer[(140, 32)].bg), theme::MODAL.bg);
+        app.menu = None;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_ne!(
+            Some(terminal.backend().buffer()[(1, 1)].bg),
+            theme::BACKDROP.bg
+        );
+    }
+
+    #[test]
+    fn menu_names_the_marked_target_even_when_cursor_is_elsewhere() {
+        let (_tmp, mut app) = sample();
+        let current = app.current().unwrap().key();
+        let target = app
+            .repos
+            .iter()
+            .find(|r| r.key() != current)
+            .unwrap()
+            .clone();
+        app.marked.insert(target.key());
+        app.menu = Some(0);
+        let screen = render(&mut app, 140, 40);
+        assert!(
+            screen.contains(&format!("Actions · {}", target.name)),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn quick_menu_navigates_and_enter_runs_the_selected_command() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (_tmp, mut app) = sample();
+        app.press_for_tests(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        assert!(app.help);
+        app.press_for_tests(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        assert!(app.help);
+        assert_eq!(app.quick_selected, 1);
+        app.press_for_tests(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(app.quick_selected, 0);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "p" && Some(cell.bg) == theme::MODAL_CURRENT.bg)
+        );
+        app.press_for_tests(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.help);
+        assert_eq!(app.menu, Some(0));
+        let selected_y = app.list_area.y + (app.selected_index().unwrap() - app.offset) as u16;
+        let quick_bg = terminal.backend().buffer()[(1, selected_y)].bg;
+        assert_ne!(Some(quick_bg), theme::BACKDROP.bg);
+        assert_eq!(
+            Some(terminal.backend().buffer()[(0, selected_y)].fg),
+            theme::PROMPT.fg
+        );
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(1, selected_y)].bg, quick_bg);
+    }
+
+    #[test]
+    fn modal_preserves_target_language_and_git_colors() {
+        let (_tmp, mut app) = sample();
+        let target = app.current().unwrap().key();
+        app.repos
+            .iter_mut()
+            .find(|r| r.key() == target)
+            .unwrap()
+            .lang = Some("rs");
+        app.statuses.insert(
+            target,
+            Some(Status {
+                dirty: 3,
+                ..Status::default()
+            }),
+        );
+        for quick in [false, true] {
+            app.help = quick;
+            app.menu = if quick { None } else { Some(0) };
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            let y = app.list_area.y + (app.selected_index().unwrap() - app.offset) as u16;
+            let buffer = terminal.backend().buffer();
+            let row: Vec<_> = (0..app.list_area.width).map(|x| &buffer[(x, y)]).collect();
+            assert!(row.iter().any(|c| Some(c.fg) == theme::lang("rs").fg));
+            assert!(row.iter().any(|c| Some(c.fg) == theme::DIRTY.fg));
+            assert!(row.iter().all(|c| !c.modifier.contains(Modifier::BOLD)));
+            assert_ne!(Some(buffer[(1, y)].bg), theme::MODAL_CURRENT.bg);
+        }
+    }
+
+    #[test]
+    fn popups_stay_centered_and_inside_the_terminal() {
+        for area in [
+            Rect::new(0, 0, 280, 65),
+            Rect::new(0, 0, 80, 24),
+            Rect::new(5, 3, 20, 6),
+        ] {
+            let rect = popup(area, 38, 14);
+            assert!(rect.x >= area.x && rect.right() <= area.right());
+            assert!(rect.y >= area.y && rect.bottom() <= area.bottom());
+            assert!((rect.x - area.x).abs_diff(area.right() - rect.right()) <= 1);
+            assert!((rect.y - area.y).abs_diff(area.bottom() - rect.bottom()) <= 1);
+        }
     }
 
     #[test]
@@ -1961,7 +2178,10 @@ tig = { cmd = 'tig', mode = 'exec' }",
         let screen = render(&mut app, 90, 16);
         assert!(screen.contains("f  fork"), "{screen}");
         assert!(screen.contains("[terminal]"), "{screen}");
-        assert!(screen.contains("after: as set"), "{screen}");
+        assert!(
+            screen.contains("After running: use configured behavior"),
+            "{screen}"
+        );
     }
 
     #[test]

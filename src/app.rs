@@ -161,6 +161,7 @@ pub struct App {
     pub items: Vec<MenuItem>,
     pub menu: Option<usize>,
     pub help: bool,
+    pub quick_selected: usize,
     /// F1: the help page, which takes the whole screen.
     pub help_page: bool,
     /// Ctrl-G: the profiles to switch to (`None` is config.toml alone),
@@ -238,6 +239,7 @@ impl App {
             items: Vec::new(),
             menu: None,
             help: false,
+            quick_selected: 0,
             help_page: false,
             profiles: None,
             naming: None,
@@ -663,6 +665,11 @@ impl App {
         self.repos.len() != before
     }
 
+    #[cfg(test)]
+    pub(crate) fn press_for_tests(&mut self, key: KeyEvent) {
+        self.key(key);
+    }
+
     fn key(&mut self, key: KeyEvent) -> Step {
         if key.kind == KeyEventKind::Release {
             return Step::Continue;
@@ -776,12 +783,18 @@ impl App {
                 query.pop();
                 self.set_query(query);
             }
-            KeyCode::Null => self.help = true,
+            KeyCode::Null => {
+                self.help = true;
+                self.quick_selected = 0;
+            }
             KeyCode::F(1) => {
                 self.help_page = true;
                 self.help_scroll = 0;
             }
-            KeyCode::Char(' ') if ctrl => self.help = true,
+            KeyCode::Char(' ') if ctrl => {
+                self.help = true;
+                self.quick_selected = 0;
+            }
             KeyCode::Char('p') if ctrl => return self.run(Action::Menu),
             KeyCode::Char('y') if ctrl => return self.run(Action::Copy),
             KeyCode::Char('u') if ctrl => self.set_query(String::new()),
@@ -860,8 +873,35 @@ impl App {
     }
 
     fn help_key(&mut self, key: KeyEvent) -> Step {
+        let shortcuts: Vec<char> = ['p', 'd', 'o', 's', 'r', 'w', 'g', 'c']
+            .into_iter()
+            .chain(self.items.iter().map(|item| item.key))
+            .collect();
+        if let Some(delta) = step(&key) {
+            self.quick_selected = (self.quick_selected as isize + delta)
+                .rem_euclid(shortcuts.len() as isize) as usize;
+            return Step::Continue;
+        }
+        if key.code == KeyCode::F(1) {
+            self.help = false;
+            self.help_page = true;
+            self.help_scroll = 0;
+            return Step::Continue;
+        }
+        let code = if key.code == KeyCode::Enter {
+            KeyCode::Char(shortcuts[self.quick_selected.min(shortcuts.len() - 1)])
+        } else {
+            key.code
+        };
+        if code != KeyCode::Esc
+            && code != KeyCode::Null
+            && key.code != KeyCode::Enter
+            && !keys::is_typed_text(&key)
+        {
+            return Step::Continue;
+        }
         self.help = false;
-        match key.code {
+        match code {
             KeyCode::Char('p') => self.run(Action::Menu),
             KeyCode::Char('r') => self.run(Action::Rescan),
             KeyCode::Char('o') => self.run(Action::ToggleHidden),
@@ -1074,7 +1114,7 @@ impl App {
     /// tab, or the selected one when nothing is marked. Marks hold through a
     /// change of query, as in fzf, so a repository filtered out of view
     /// still counts.
-    fn targets(&self) -> Vec<Repo> {
+    pub(crate) fn targets(&self) -> Vec<Repo> {
         if self.marked.is_empty() {
             return self.current().cloned().into_iter().collect();
         }
