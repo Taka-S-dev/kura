@@ -135,7 +135,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
     };
     frame.render_widget(
-        Paragraph::new(Line::styled(format!(" {hints}"), theme::BORDER)),
+        Paragraph::new(Line::styled(format!(" {hints}"), theme::QUIET)),
         rows(4 + list_height, 1),
     );
     if app.profiles.is_some() {
@@ -171,7 +171,8 @@ fn split(area: Rect) -> (Rect, Option<Rect>) {
         return (area, None);
     }
     let preview = (area.width * 2 / 5).clamp(44, 72);
-    let list = Rect::new(area.x, area.y, area.width - preview, area.height);
+    // Extra terminal width must not push details away from the repository names.
+    let list = Rect::new(area.x, area.y, (area.width - preview).min(104), area.height);
     (
         list,
         Some(Rect::new(list.right(), area.y, preview, area.height)),
@@ -241,6 +242,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &mut App) {
     left.push(Span::styled(" > ", theme::PROMPT));
     left.push(Span::raw(app.query.clone()));
     let cursor_x = area.x + left.iter().map(|s| s.content.width() as u16).sum::<u16>();
+    if app.query.is_empty() && area.width >= 80 {
+        left.push(Span::styled(
+            "Search repositories · rs: language",
+            theme::QUIET,
+        ));
+    }
     frame.render_widget(Paragraph::new(Line::from(left)), area);
     if app.menu.is_none() && !app.help {
         frame.set_cursor_position((cursor_x.min(area.right() - 1), area.y));
@@ -350,6 +357,15 @@ fn columns(width: usize, name: usize, branch: Option<usize>, icons: bool) -> Col
 }
 
 fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
+    let header = area.height >= 3;
+    let outer = area;
+    let area = Rect::new(
+        area.x,
+        area.y + u16::from(header),
+        area.width,
+        area.height - u16::from(header),
+    );
+    app.list_area = area;
     let height = area.height as usize;
     if app.hits.is_empty() {
         let text = if app.view == View::Hidden {
@@ -396,6 +412,29 @@ fn draw_list(frame: &mut Frame, area: Rect, app: &mut App) {
         .max()
         .map(|w| w.min(BRANCH_MAX));
     let cols = columns(area.width as usize, name_w, branch_w, app.icons);
+    if header {
+        let mut labels = " ".repeat(POINTER);
+        if cols.lang {
+            labels.push_str(&" ".repeat(if cols.icons { LANG_ICON } else { LANG }));
+        }
+        labels.push_str(&pad(&fit("Repository", cols.name), cols.name));
+        if cols.status {
+            labels.push_str(&format!("  {:STATUS$}", "Git"));
+        }
+        if let Some(w) = cols.branch {
+            labels.push_str(&format!("  {}", pad(&fit("Branch", w), w)));
+        }
+        if cols.age {
+            labels.push_str(&format!("{:>AGE$}", "Age"));
+        }
+        if let Some(w) = cols.parent {
+            labels.push_str(&format!("  {}", pad(&fit("Folder", w), w)));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::styled(labels, theme::QUIET)),
+            Rect::new(outer.x, outer.y, outer.width, 1),
+        );
+    }
     let home = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf());
     let roots = app.roots().to_vec();
     let now = SystemTime::now();
@@ -451,7 +490,7 @@ fn row(
 ) -> Line<'static> {
     // The bar is the cursor, the dot a mark from Tab, as in fzf.
     let mut spans = vec![
-        Span::styled(if current { "▌" } else { " " }, theme::POINTER),
+        Span::styled(if current { "›" } else { " " }, theme::POINTER),
         Span::styled(if marked { "✓ " } else { "  " }, theme::MARK),
     ];
     if cols.lang {
@@ -463,7 +502,13 @@ fn row(
         }
     }
     let name = fit(&repo.name, cols.name);
-    spans.extend(highlight(&name, hits));
+    let mut name_spans = highlight(&name, hits);
+    if current {
+        for span in &mut name_spans {
+            span.style = span.style.add_modifier(Modifier::BOLD);
+        }
+    }
+    spans.extend(name_spans);
     let mut used = name.width();
     if repo.worktree && used + 3 <= cols.name {
         spans.push(Span::styled(" wt", theme::INFO));
@@ -522,9 +567,9 @@ fn is_default_branch(branch: &str) -> bool {
 fn state(checked: bool, status: Option<&Status>) -> Vec<Span<'static>> {
     let Some(status) = status else {
         return if checked {
-            vec![Span::styled("?", theme::QUIET)]
+            vec![Span::styled("! unknown", theme::DIRTY)]
         } else {
-            Vec::new()
+            vec![Span::styled("…", theme::QUIET)]
         };
     };
     let mut spans = Vec::new();
@@ -599,32 +644,6 @@ fn draw_preview(frame: &mut Frame, area: Rect, app: &App) {
         theme::BOLD,
     )];
 
-    // What it is: the README's first paragraph, the thing most easily
-    // forgotten about a repository not opened in months.
-    match app.abouts.get(&key) {
-        Some(Some(about)) => {
-            let wrapped = wrap(about, width);
-            let more = wrapped.len() > ABOUT_LINES;
-            for (i, line) in wrapped.into_iter().take(ABOUT_LINES).enumerate() {
-                let line = if more && i == ABOUT_LINES - 1 {
-                    fit(&format!("{line}…"), width)
-                } else {
-                    line
-                };
-                lines.push(Line::raw(format!(" {line}")));
-            }
-        }
-        Some(None) => {}
-        None => lines.push(Line::styled(" …", theme::QUIET)),
-    }
-
-    // What it is written in, as GitHub's bar shows it.
-    if let Some(mix) = app.mixes.get(&key).filter(|m| !m.is_empty()) {
-        lines.push(Line::raw(""));
-        lines.push(language_bar(mix, width));
-        lines.push(language_legend(mix));
-    }
-
     // Where it stands with git.
     lines.push(Line::raw(""));
     let status = app.status(repo);
@@ -634,17 +653,14 @@ fn draw_preview(frame: &mut Frame, area: Rect, app: &App) {
     } else if status.is_some() {
         branch.push(Span::styled("  no upstream", theme::QUIET));
     }
-    lines.push(field("branch", branch));
+    lines.extend(wrap_field(field("branch", branch), width));
     let words = match (app.checked(repo), status) {
         (false, _) => vec![Span::styled("checking…", theme::QUIET)],
         (true, None) if untrusted => vec![Span::styled(
             "not asked: its git config runs programs",
             theme::NOTICE_BAD,
         )],
-        (true, None) => vec![Span::styled(
-            "git gave no answer: too slow, or the repository is damaged",
-            theme::QUIET,
-        )],
+        (true, None) => vec![Span::styled("Git status unavailable", theme::DIRTY)],
         (true, Some(s)) if !s.needs_attention() => {
             vec![Span::styled(
                 "nothing to commit, push or pull",
@@ -671,7 +687,12 @@ fn draw_preview(frame: &mut Frame, area: Rect, app: &App) {
             spans
         }
     };
-    lines.push(field("state", words));
+    lines.extend(wrap_field(field("state", words), width));
+    if app.checked(repo) && status.is_none() && !untrusted {
+        for text in wrap("F5: rescan and retry. Git failed or timed out.", width) {
+            lines.push(Line::styled(format!(" {text}"), theme::QUIET));
+        }
+    }
     let log = app.logs.get(&key).and_then(|l| l.as_ref());
     if let Some(remote) = log.and_then(|l| l.remote.as_deref()) {
         lines.push(field(
@@ -760,6 +781,32 @@ fn draw_preview(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // What it is: the README's first paragraph, the thing most easily
+    // forgotten about a repository not opened in months.
+    match app.abouts.get(&key) {
+        Some(Some(about)) => {
+            let wrapped = wrap(about, width);
+            let more = wrapped.len() > ABOUT_LINES;
+            for (i, line) in wrapped.into_iter().take(ABOUT_LINES).enumerate() {
+                let line = if more && i == ABOUT_LINES - 1 {
+                    fit(&format!("{line}…"), width)
+                } else {
+                    line
+                };
+                lines.push(Line::raw(format!(" {line}")));
+            }
+        }
+        Some(None) => {}
+        None => lines.push(Line::styled(" …", theme::QUIET)),
+    }
+
+    // What it is written in, as GitHub's bar shows it.
+    if let Some(mix) = app.mixes.get(&key).filter(|m| !m.is_empty()) {
+        lines.push(Line::raw(""));
+        lines.push(language_bar(mix, width));
+        lines.push(language_legend(mix));
+    }
+
     // What was committed lately, in whatever room is left.
     lines.push(Line::raw(""));
     lines.push(Line::styled(" recent", theme::BOLD));
@@ -794,7 +841,19 @@ fn draw_preview(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), text);
 }
 
-/// Lines of README shown before the rest of the panel.
+/// Keep long branch names and status explanations inside the preview.
+fn wrap_field(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+    if line.width() <= width + 1 {
+        return vec![line];
+    }
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    wrap(text.trim_start(), width)
+        .into_iter()
+        .map(|text| Line::raw(format!(" {text}")))
+        .collect()
+}
+
+/// Lines of README shown in the panel.
 const ABOUT_LINES: usize = 3;
 const CHANGES_SHOWN: usize = 6;
 const BRANCHES_SHOWN: usize = 3;
@@ -1563,6 +1622,26 @@ mod tests {
     }
 
     #[test]
+    fn headings_exclude_the_clickable_rows_and_errors_offer_recovery() {
+        let (_tmp, mut app) = sample();
+        let repo = app.current().unwrap().clone();
+        app.statuses.insert(repo.key(), None);
+        let screen = render(&mut app, 120, 30);
+        assert!(screen.lines().nth(2).unwrap().contains("Git"), "{screen}");
+        assert_eq!(app.list_area.y, 3);
+        assert!(screen.contains("Git status unavailable"), "{screen}");
+        assert!(screen.contains("F5: rescan and retry."), "{screen}");
+        assert!(screen.contains("! unknown"), "{screen}");
+        render(&mut app, 80, 6);
+        assert_eq!(app.list_area.y, 2);
+        assert_eq!(app.list_area.height, 1);
+        let field = Line::raw(" branch feature/a-very-long-branch-name");
+        let wrapped = wrap_field(field, 20);
+        assert!(wrapped.len() > 1);
+        assert!(wrapped.iter().all(|line| line.width() <= 21));
+    }
+
+    #[test]
     fn long_text_is_cut_at_the_right_end() {
         assert_eq!(fit("dayplanner-notify", 8), "dayplan…");
         assert_eq!(fit_left(r"~\src\github\playground", 12), "…\\playground");
@@ -1707,7 +1786,7 @@ tig = { cmd = 'tig', mode = 'exec' }",
     fn the_age_comes_before_the_folder() {
         let (tmp, mut app) = sample();
         let screen = render(&mut app, 120, 10);
-        let row = screen.lines().nth(2).unwrap();
+        let row = screen.lines().nth(3).unwrap();
         let folder = tmp
             .path()
             .file_name()
