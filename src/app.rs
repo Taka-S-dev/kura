@@ -1582,14 +1582,22 @@ pub fn run(mut app: App) -> Result<Outcome, Error> {
             app.tick = app.tick.wrapping_add(1);
             continue;
         }
-        let step = match event::read()? {
-            Event::Key(key) => app.key(key),
-            Event::Mouse(mouse) => app.mouse(mouse),
-            Event::Resize(..) => {
-                term.clear()?;
-                Step::Continue
+        // Every event already waiting is handled before the next frame: a
+        // held key that scrolls the whole list redraws every row, and one
+        // frame per repeat falls behind and keeps moving after the key is up.
+        let step = loop {
+            let step = match event::read()? {
+                Event::Key(key) => app.key(key),
+                Event::Mouse(mouse) => app.mouse(mouse),
+                Event::Resize(..) => {
+                    term.clear()?;
+                    Step::Continue
+                }
+                _ => Step::Continue,
+            };
+            if !matches!(step, Step::Continue) || !event::poll(Duration::ZERO)? {
+                break step;
             }
-            _ => Step::Continue,
         };
         match step {
             Step::Continue => {}
