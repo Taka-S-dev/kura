@@ -2,7 +2,7 @@
 //! loop that ties them to the terminal.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +14,8 @@ use crossterm::event::{
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode,
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
@@ -1576,7 +1577,7 @@ pub fn run(mut app: App) -> Result<Outcome, Error> {
     let outcome = loop {
         app.pump();
         app.prepare();
-        term.draw(|frame| crate::view::draw(frame, &mut app))?;
+        term.render(&mut app)?;
         let wait = if app.busy() { 100 } else { 1000 };
         if !event::poll(Duration::from_millis(wait))? {
             app.tick = app.tick.wrapping_add(1);
@@ -1630,12 +1631,24 @@ pub fn run(mut app: App) -> Result<Outcome, Error> {
 /// window is used: drawn inline, terminals that pin the command line of
 /// long output (VS Code's) covered the list.
 struct Tui {
-    terminal: Terminal<CrosstermBackend<io::Stderr>>,
+    terminal: Terminal<CrosstermBackend<BufWriter<io::Stderr>>>,
     /// Whether the terminal's title was set, and so is to be put back.
     titled: bool,
 }
 
 impl Tui {
+    /// Batch terminal writes and keep partial frames hidden on terminals
+    /// supporting synchronized updates. Always end the update after errors.
+    fn render(&mut self, app: &mut App) -> io::Result<()> {
+        crossterm::queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
+        let drawn = self
+            .terminal
+            .draw(|frame| crate::view::draw(frame, app))
+            .map(|_| ());
+        let ended = crossterm::execute!(self.terminal.backend_mut(), EndSynchronizedUpdate);
+        drawn.and(ended)
+    }
+
     /// Takes the terminal; `title`, unless empty, names its tab meanwhile.
     fn enter(title: &str) -> Result<Self, Error> {
         enable_raw_mode()?;
@@ -1652,7 +1665,7 @@ impl Tui {
                 )?;
             }
             let mut terminal = Terminal::with_options(
-                CrosstermBackend::new(io::stderr()),
+                CrosstermBackend::new(BufWriter::with_capacity(256 * 1024, io::stderr())),
                 TerminalOptions {
                     viewport: Viewport::Fullscreen,
                 },
@@ -1669,7 +1682,7 @@ impl Tui {
 }
 
 impl std::ops::Deref for Tui {
-    type Target = Terminal<CrosstermBackend<io::Stderr>>;
+    type Target = Terminal<CrosstermBackend<BufWriter<io::Stderr>>>;
     fn deref(&self) -> &Self::Target {
         &self.terminal
     }
@@ -1683,6 +1696,7 @@ impl std::ops::DerefMut for Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(self.terminal.backend_mut(), EndSynchronizedUpdate);
         if self.titled {
             let _ = crossterm::execute!(io::stderr(), crossterm::style::Print("\x1b[23;0t"));
         }
