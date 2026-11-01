@@ -1,0 +1,24 @@
+[package]
+name = "kura"
+version = "0.1.0"
+edition = "2024"
+description = "Finds the Git repositories scattered across your PC, lists them in one place and jumps to them"
+license = "MIT"
+
+[dependencies]
+arboard = { version = "3.6", default-features = false }
+clap = { version = "4.6", features = ["derive"] }
+crossterm = "0.29"
+directories = "6"
+globset = "0.4"
+ignore = "0.4.33"
+nucleo = "0.5"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "1.1", features = ["preserve_order"] }
+toml_edit = "0.25"
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

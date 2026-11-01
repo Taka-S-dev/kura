@@ -1,0 +1,26 @@
+# Everything is ignored unless listed here, so a file nobody meant to
+# publish stays out by default.
+*
+!/.gitignore
+!/Cargo.toml
+!/Cargo.lock
+!/README.md
+!/LICENSE
+!/src/
+!/src/**/
+!/src/**/*.rs
+!/tests/
+!/tests/**/
+!/tests/**/*.rs
+!/.github/
+!/.github/workflows/
+!/.github/workflows/*.yml
+
+# Secrets stay out even inside the paths allowed above.
+.env
+.env.*
+*.pem
+*.key
+id_rsa*
+secrets.*
+credentials.*
