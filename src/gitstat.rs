@@ -263,7 +263,9 @@ pub fn status(repo: &Path) -> Option<Status> {
 
 pub fn log(repo: &Path) -> Option<Log> {
     // A repository without commits makes log fail; that is an empty log.
-    let commits = git(
+    // When HEAD names a commit all the same, the commit cannot be read: an
+    // object went missing, as a cloud folder's sync can leave it.
+    let commits = match git(
         repo,
         &[
             "log",
@@ -271,9 +273,11 @@ pub fn log(repo: &Path) -> Option<Log> {
             "--no-show-signature",
             "--format=%h%x09%cr%x09%s",
         ],
-    )
-    .map(|out| parse_log(&out))
-    .unwrap_or_default();
+    ) {
+        Some(out) => parse_log(&out),
+        None if git(repo, &["rev-parse", "--verify", "-q", "HEAD"]).is_some() => return None,
+        None => Vec::new(),
+    };
     let remote = git(repo, &["remote", "get-url", "origin"])
         .map(|out| out.trim().to_string())
         .filter(|url| !url.is_empty());
@@ -749,5 +753,38 @@ u UU N... 100644 100644 100644 100644 f g h conflict.txt
             }
             _ => panic!("expected a status"),
         }
+    }
+
+    #[test]
+    fn a_missing_commit_is_not_taken_for_an_empty_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .output()
+                .is_ok_and(|o| o.status.success())
+        };
+        if !run(&["init", "-q"]) {
+            return;
+        }
+        assert!(
+            log(repo)
+                .expect("an empty repository has a log")
+                .commits
+                .is_empty()
+        );
+        std::fs::write(repo.join("a.txt"), "x").unwrap();
+        assert!(run(&["add", "a.txt"]) && run(&["commit", "-q", "-m", "first"]));
+        assert_eq!(log(repo).unwrap().commits.len(), 1);
+        // The commit's object goes missing, as a cloud folder's sync can
+        // leave it; HEAD still names it.
+        let head = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        let head = head.trim();
+        std::fs::remove_file(repo.join(".git/objects").join(&head[..2]).join(&head[2..])).unwrap();
+        assert!(log(repo).is_none());
     }
 }

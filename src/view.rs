@@ -641,7 +641,10 @@ fn draw_preview(frame: &mut Frame, area: Rect, app: &App) {
             "not asked: its git config runs programs",
             theme::NOTICE_BAD,
         )],
-        (true, None) => vec![Span::styled("git did not answer in time", theme::QUIET)],
+        (true, None) => vec![Span::styled(
+            "git gave no answer: too slow, or the repository is damaged",
+            theme::QUIET,
+        )],
         (true, Some(s)) if !s.needs_attention() => {
             vec![Span::styled(
                 "nothing to commit, push or pull",
@@ -763,7 +766,10 @@ fn draw_preview(frame: &mut Frame, area: Rect, app: &App) {
     match app.logs.get(&key) {
         None => lines.push(Line::styled("  …", theme::QUIET)),
         Some(None) if untrusted => lines.push(Line::styled("  not asked", theme::QUIET)),
-        Some(None) => lines.push(Line::styled("  git did not answer", theme::QUIET)),
+        Some(None) => lines.push(Line::styled(
+            "  git could not read the commits",
+            theme::QUIET,
+        )),
         Some(Some(l)) if l.commits.is_empty() => {
             lines.push(Line::styled("  no commits yet", theme::QUIET));
         }
@@ -1193,7 +1199,7 @@ fn draw_help_page(frame: &mut Frame, area: Rect, app: &mut App) {
                 ),
                 (
                     vec![Span::styled("?", theme::QUIET)],
-                    "git did not answer in time, or was not asked: the preview says why".into(),
+                    "git gave no answer, or was not asked: the preview says why".into(),
                 ),
                 (Vec::new(), "blank: nothing to do".into()),
             ],
